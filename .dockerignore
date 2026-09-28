@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+videos/*
+!videos/.gitkeep
+.git/
+.gitignore
+DOCUMENTATION.md
+documentation.md

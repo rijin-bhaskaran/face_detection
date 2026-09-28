@@ -1,0 +1,49 @@
+{
+  "video": {
+    "path": "",
+    "camera_index": 0,
+    "source": "auto"
+  },
+  "detector": "dnn",
+  "cascades": [
+    {
+      "name": "frontal_alt",
+      "path": "cascades/haarcascade_frontalface_alt.xml",
+      "enabled": true,
+      "min_neighbors": 3
+    },
+    {
+      "name": "frontal_default",
+      "path": "cascades/haarcascade_frontalface_default.xml",
+      "enabled": true,
+      "min_neighbors": 5,
+      "min_weight": 2
+    }
+  ],
+  "dnn": {
+    "model_path": "models/face_detection_yunet_2026may.onnx",
+    "score_threshold": 0.7,
+    "nms_threshold": 0.3,
+    "top_k": 5000
+  },
+  "eyes": {
+    "enabled": true,
+    "cascade_path": "cascades/haarcascade_eye.xml",
+    "scale_factor": 1.05,
+    "min_neighbors": 3,
+    "min_size": [10, 10],
+    "verify_haar_faces": false,
+    "min_eyes": 1
+  },
+  "detection": {
+    "scale_factor": 1.05,
+    "min_neighbors": 3,
+    "min_size": [24, 24],
+    "max_size": null,
+    "max_faces": 0,
+    "min_cascade_agreement": 2
+  },
+  "display": {
+    "enabled": true
+  }
+}
