@@ -1,0 +1,12 @@
+{
+  "_review_notes": "Reviewed every candidate sheet by eye. All candidates found only by the Haar cascades were boxes on clothing/bodies (dress, vest, shirt) or the woman half-hidden at the doorway, so they are rejected. One DNN candidate (frame 912, id 1) is a box on the neck below the real face. Frames 336/648/660/900 show a woman at the far doorway whose face is too small/occluded to box reliably: ignored.",
+  "reject_haar_only": true,
+  "reject": ["912:1"],
+  "add": [],
+  "ignore": [
+    {"frame": 336, "box": [495, 165, 65, 75]},
+    {"frame": 648, "box": [495, 150, 65, 75]},
+    {"frame": 660, "box": [495, 150, 65, 75]},
+    {"frame": 900, "box": [495, 150, 65, 75]}
+  ]
+}

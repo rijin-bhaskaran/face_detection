@@ -28,9 +28,10 @@
   },
   "eyes": {
     "enabled": true,
+    "source": "auto",
     "cascade_path": "cascades/haarcascade_eye.xml",
-    "scale_factor": 1.05,
-    "min_neighbors": 3,
+    "scale_factor": 1.1,
+    "min_neighbors": 2,
     "min_size": [10, 10],
     "verify_haar_faces": false,
     "min_eyes": 1
@@ -41,7 +42,17 @@
     "min_size": [24, 24],
     "max_size": null,
     "max_faces": 0,
-    "min_cascade_agreement": 2
+    "min_cascade_agreement": 2,
+    "detect_every_n_frames": 1
+  },
+  "tracking": {
+    "enabled": true,
+    "smoothing": 0.4,
+    "face_hold_frames": {
+      "haar": 1,
+      "dnn": 0
+    },
+    "eye_hold_frames": 15
   },
   "display": {
     "enabled": true

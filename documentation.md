@@ -22,8 +22,15 @@ Face_Detection/
 │   └── haarcascade_eye.xml
 ├── models/                         # DNN face detector model
 │   └── face_detection_yunet_2026may.onnx
+├── evaluation/                     # Latency/accuracy evaluation (see below)
+│   ├── run_evaluation.py
+│   ├── label_helper.py
+│   ├── ground_truth.json
+│   └── labeling/decisions.json
+├── reports/                        # Evaluation output, one timestamped folder per run (git-ignored)
 ├── requirements.txt                # Dependencies for local/dev use (with GUI display)
 ├── requirements-docker.txt         # Dependencies for the container (headless)
+├── requirements-eval.txt           # Extra dependency (matplotlib) for evaluation/
 ├── Dockerfile                      # Container build for edge deployment
 ├── .dockerignore
 ├── .gitignore
@@ -43,8 +50,10 @@ Face_Detection/
   },
   "detector": "dnn",
   "cascades": [
-    { "name": "frontal_alt", "path": "cascades/haarcascade_frontalface_alt.xml", "enabled": true },
-    { "name": "frontal_default", "path": "cascades/haarcascade_frontalface_default.xml", "enabled": true }
+    { "name": "frontal_alt", "path": "cascades/haarcascade_frontalface_alt.xml", "enabled": true,
+      "min_neighbors": 3 },
+    { "name": "frontal_default", "path": "cascades/haarcascade_frontalface_default.xml", "enabled": true,
+      "min_neighbors": 5, "min_weight": 2 }
   ],
   "dnn": {
     "model_path": "models/face_detection_yunet_2026may.onnx",
@@ -54,19 +63,28 @@ Face_Detection/
   },
   "eyes": {
     "enabled": true,
+    "source": "auto",
     "cascade_path": "cascades/haarcascade_eye.xml",
-    "scale_factor": 1.05,
-    "min_neighbors": 3,
+    "scale_factor": 1.1,
+    "min_neighbors": 2,
     "min_size": [10, 10],
-    "verify_haar_faces": true,
+    "verify_haar_faces": false,
     "min_eyes": 1
   },
   "detection": {
-    "scale_factor": 1.1,
-    "min_neighbors": 8,
-    "min_size": [60, 60],
+    "scale_factor": 1.05,
+    "min_neighbors": 3,
+    "min_size": [24, 24],
     "max_size": null,
-    "max_faces": 1
+    "max_faces": 0,
+    "min_cascade_agreement": 2,
+    "detect_every_n_frames": 1
+  },
+  "tracking": {
+    "enabled": true,
+    "smoothing": 0.4,
+    "face_hold_frames": { "haar": 1, "dnn": 0 },
+    "eye_hold_frames": 15
   },
   "display": {
     "enabled": true
@@ -94,24 +112,71 @@ Face_Detection/
   ONNX file; `score_threshold` (0–1) is the minimum confidence to keep a
   face (raise it for fewer false positives); `nms_threshold` and `top_k`
   control overlap suppression.
-- **`eyes`** — eye detection with `haarcascade_eye.xml`, run inside every
-  kept face box (upper part of the face only, at most one eye per side)
-  and drawn as red boxes. Set `enabled: false` to turn it off. With the
-  Haar detector, `verify_haar_faces: true` also discards any face box
-  containing fewer than `min_eyes` eyes — this is what removes Haar boxes
-  that land on a torso or background. Eye verification is not applied to
-  the DNN detector, which is reliable on its own.
+- **`eyes`** — eyes are drawn as red boxes inside every face box. Set
+  `enabled: false` to turn them off. `source` picks where they come from:
+  `"landmarks"` uses the eye positions the DNN detector reports for each
+  face (reliable, DNN only), `"cascade"` runs `haarcascade_eye.xml` inside
+  the upper part of the face (at most one eye per side), and `"auto"`
+  (default) uses landmarks with the DNN detector and the cascade with Haar.
+  The eye cascade runs on the upper face band after a 2x upscale and CLAHE
+  contrast enhancement; without that it found an eye in only ~21% of faces
+  on the sample video (hazy, low contrast) and with it about 86%, at
+  roughly 13 ms per face. `verify_haar_faces: true` (off by default) additionally
+  discards Haar face boxes with fewer than `min_eyes` eyes; because of the
+  cascade's low hit rate this also discards most real faces, and it can't
+  work on small faces at all.
+- **`tracking`** — removes box/eye flicker. Detectors miss a face or an
+  eye on some frames and jitter on others, so detections are matched to
+  faces from earlier frames and smoothed. `smoothing` (0–1) is the weight
+  of the newest detection (lower = smoother but laggier), `face_hold_frames`
+  keeps a face on screen for that many detection passes after it's lost
+  (a number, or `{"haar": n, "dnn": n}` per detector), and `eye_hold_frames`
+  does the same for each eye. Holding a lost face hides flicker but leaves
+  a ghost box when a person leaves or turns away. Measured on the sample
+  video: for DNN, hold 0 gives 0 false positives and the least flicker (3
+  gives 5 false positives and twice the flicker), so DNN defaults to 0; for
+  the flakier Haar detector hold 1 removes the ghost boxes (precision 95% →
+  100%, F1 0.932 → 0.953) at some cost in face-count flicker, so Haar
+  defaults to 1. Eyes are stored
+  relative to their face box, so they follow it as it moves or grows. Set
+  `enabled: false` to draw raw per-frame detections. On the sample video
+  tracking cut frames where the eye count flickered from 96–105 to about 22
+  and eye-box jumps (90th percentile) from about 50 px to about 6 px.
+  Eye candidates from the cascade must also sit where eyes anatomically are
+  on the face (about 22–56% down, left or right of centre, 12–42% of the
+  face width) and the two eyes must be at least 32% of the face width
+  apart; this rejects eyebrows, glasses frames and duplicate boxes on one
+  eye.
 - **`detection.max_faces`** — keep only the N largest faces per frame
-  (`1` = the face closest to the camera). `0` keeps every face. Override
-  with `--max-faces`. Note this selects by size, not identity: it doesn't
-  recognise *whose* face it is.
+  (`1` = only the face closest to the camera). `0` (default) keeps every
+  face. Override with `--max-faces`. This selects by size, not identity: it
+  doesn't recognise *whose* face it is.
+- **`detection.min_cascade_agreement`** — (Haar only) how many enabled
+  cascades must find a face for it to be kept. The **first** cascade scans
+  the whole frame and proposes faces; every other cascade only re-checks a
+  small region around each proposal (cheap) and votes if it finds an
+  overlapping box (IoU > 0.3). With the two default cascades, `2` means
+  both must agree. This is the main defence against boxes on
+  clothing/bodies: a single cascade fires on textured clothing, but
+  different cascades rarely make the same mistake. `1` uses the first
+  cascade alone.
+- **`detection.detect_every_n_frames`** — run detection only on every Nth
+  frame and redraw the previous boxes in between. `1` (default) detects
+  every frame. Raise it to cut CPU proportionally (Haar on the sample video
+  takes about 100 s at `1` and 36 s at `3`); boxes lag by up to N-1 frames.
+  Haar speed is otherwise governed mainly by `scale_factor` (1.05 is about
+  1.6x slower than 1.08 but finds more faces) and `min_size`.
 - **`cascades`** — (Haar only) an ordered list of cascades. Each entry has a `name`
   (used in logs and for `--cascades` overrides), a `path`, and an
   `enabled` flag. Set `enabled: false` to skip a cascade without deleting
   it from the file, or add a new entry to run a custom cascade you drop
-  into `cascades/` — no code changes required. Each enabled cascade draws
-  its detections in a different box color, cycled in list order.
-  At least one cascade must be enabled.
+  into `cascades/` — no code changes required. Optional per-cascade
+  overrides: `min_neighbors` (replaces `detection.min_neighbors` for this
+  cascade) and `min_weight` (this cascade only votes for boxes whose
+  detection confidence reaches it). Merged faces use the first cascade's
+  box and color. At least one cascade must be enabled. In Haar mode, a box
+  lying directly below another face box (a torso under a head) is also
+  dropped.
 - **`detection.scale_factor` / `detection.min_neighbors`** —
   `detectMultiScale` parameters, applied to every enabled cascade
   (Haar only).
@@ -139,11 +204,12 @@ device), instead of editing `config.json` in place.
      `videos/` directory, then the system camera. Each step falls through
      to the next if the file is missing or OpenCV can't open it, with a
      warning logged explaining why.
-4. For every frame: detects faces with the configured detector (Haar
-   `detectMultiScale` per enabled cascade, or the DNN detector), sorts
-   them largest first, runs eye detection inside each face, drops Haar
-   faces without eyes, keeps at most `max_faces`, and draws the face box
-   (cascade color / green for DNN) plus red eye boxes.
+4. For every frame: detects faces with the configured detector (Haar:
+   every enabled cascade, merged so a face must be confirmed by
+   `min_cascade_agreement` cascades, with torso boxes under a head
+   dropped; or the DNN detector), sorts them largest first, finds the
+   eyes in each face, keeps at most `max_faces` (all by default), and draws
+   the face box (green) plus red eye boxes.
 5. Displays the annotated frame in a window, unless display is disabled or
    unavailable (e.g. inside a headless container), in which case it keeps
    processing without a preview.
@@ -203,6 +269,7 @@ CLI flags override the corresponding config value for that run only;
 | `--camera`          | off                   | Shorthand for `--source camera`.              |
 | `--detector`        | *(from config)*      | Override `detector`: `haar` or `dnn`.         |
 | `--max-faces`       | *(from config)*      | Keep only the N largest faces (`0` = all).    |
+| `--save-video`      | off                   | Also write the annotated frames to a video file (e.g. `out.mp4`). |
 | `--cascades`        | *(from config)*      | Comma-separated cascade `name`s to enable, overriding config's `enabled` flags (e.g. `frontal_default` or `frontal_alt,frontal_default`). |
 | `--no-display`      | *(from config)*      | Force-disables the preview window.            |
 | `--scale-factor`    | *(from config)*      | Override `detectMultiScale` scaleFactor.      |
@@ -352,6 +419,67 @@ importing it and calling `cv2.CascadeClassifier(...)` raises
 `AttributeError`. Both `requirements.txt` and `requirements-docker.txt`
 pin OpenCV to the stable `4.10.0.84` release, which does not have this
 problem. Re-test before upgrading past this pin.
+
+## Evaluating detector performance (`evaluation/`)
+
+`evaluation/run_evaluation.py` runs the real pipeline (`app.Pipeline`, the
+same class `app.py` uses) over a video once per detector, with per-frame
+timing, and scores it against hand-reviewed ground truth. It writes graphs,
+raw data and a written summary to a new, timestamped `reports/<date>-<time>/`
+folder — nothing is overwritten between runs.
+
+```powershell
+.venv\Scripts\pip install -r requirements-eval.txt   # matplotlib, one-time
+.venv\Scripts\python evaluation\run_evaluation.py
+```
+
+Each report folder contains:
+
+- **`summary.md`** — the write-up: setup, latency table, accuracy table,
+  eyes/stability table, embedded graphs, and a few auto-computed takeaways.
+  Open this first.
+- **PNG graphs** — latency over time, latency distribution and percentiles,
+  where the time goes (detection/eyes/tracking) and throughput, latency vs.
+  how many faces are in frame, two confusion matrices (frame-level "is
+  there a face" and face-count), precision/recall/F1, recall by face size,
+  eye coverage and output flicker, and an error gallery (missed faces and
+  false-positive boxes, rendered on the actual frames).
+- **`metrics.json`** — every number above, unrounded, plus the exact
+  settings each detector ran with.
+- **`per_frame.csv`** — one row per (detector, frame): latency broken down
+  by stage, face count, eye count. For custom analysis/plots.
+
+Options: `--detectors haar` or `--detectors dnn` to run one; `--iou` to
+change the match threshold (default 0.3); `--repeats` for how many passes
+to average per detector (default 3 — a machine hiccup on one pass, like a
+background scan, is far less likely to skew 3 medians than 1 raw run);
+`--config` to evaluate a different config file; `--video` for a different
+clip (needs its own ground truth — see below).
+
+### Confusion matrix note
+
+A confusion matrix needs a defined negative class, which individual face
+boxes don't have (there's no fixed number of "not a face" boxes a frame
+could produce). Two matrices are reported instead: **frame-level** (does
+this frame contain a face, yes/no) and **face-count** (0 / 1 / 2 / 3+ faces
+in the frame, actual vs. predicted). Box-level correctness is reported the
+usual way for detection instead: true/false positives/negatives and
+precision/recall/F1, at a configurable IoU threshold.
+
+### Ground truth (`evaluation/ground_truth.json`)
+
+There's no independent labelled dataset for the sample video, so ground
+truth is built semi-automatically: `evaluation/label_helper.py candidates`
+samples every Nth frame, proposes candidate boxes from **both** detectors
+at deliberately loose thresholds (so a real face is very unlikely to be
+missed), and renders them onto review sheets under
+`evaluation/labeling/sheets/`. A person looks at the sheets once and records
+in `evaluation/labeling/decisions.json` which candidates are false positives
+(plus any face nobody found, and any region too small/occluded to label
+reliably). `label_helper.py build` then writes `ground_truth.json` from
+those decisions. The sample video's `ground_truth.json` and
+`decisions.json` are committed, so `run_evaluation.py` works out of the box;
+re-run both steps if you swap in a different video.
 
 ## Controls (when a display is available)
 
