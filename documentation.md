@@ -60,7 +60,10 @@ Face_Detection/
     "model_path": "models/face_detection_yunet_2026may.onnx",
     "score_threshold": 0.7,
     "nms_threshold": 0.3,
-    "top_k": 5000
+    "top_k": 5000,
+    "input_width": 0,
+    "weak_score_threshold": 0.5,
+    "enhance_contrast": false
   },
   "eyes": {
     "enabled": true,
@@ -113,6 +116,17 @@ Face_Detection/
   ONNX file; `score_threshold` (0–1) is the minimum confidence to keep a
   face (raise it for fewer false positives); `nms_threshold` and `top_k`
   control overlap suppression.
+  - `weak_score_threshold` (default `0.5`, `0` = off) — a face scoring
+    between this and `score_threshold` is kept only if it continues a face
+    that is already tracked; a new face still needs `score_threshold`. This
+    stops a real face from blinking out when its confidence dips for a frame,
+    without letting doubtful new boxes appear. Going lower than 0.5 mostly
+    adds backs of heads and background (checked by eye on clip3).
+  - `input_width` (default `0` = native) — frames wider than this are
+    downscaled before the network and the boxes mapped back. Faster, but small
+    faces are lost (see the change log); only use it when faces are large.
+  - `enhance_contrast` (default `false`) — CLAHE on the luminance channel
+    before detection. About 2x slower and no gain on the sample clips.
 - **`eyes`** — eyes are drawn as red boxes inside every face box. Set
   `enabled: false` to turn them off. `source` picks where they come from:
   `"landmarks"` uses the eye positions the DNN detector reports for each
@@ -165,7 +179,12 @@ Face_Detection/
   frame and redraw the previous boxes in between. `1` (default) detects
   every frame. Raise it to cut CPU proportionally (Haar on the sample video
   takes about 100 s at `1` and 36 s at `3`); boxes lag by up to N-1 frames.
-  Haar speed is otherwise governed mainly by `scale_factor` (1.05 is about
+  Between detection passes the tracker moves each box on by its measured
+  velocity, so boxes keep moving instead of freezing. Measured on the DNN
+  (face-reco-video): at `2` the cost per frame roughly halves, precision and
+  recall are unchanged, but box jitter rises (0.037 -> 0.095 of a face width
+  per frame); at `5` recall falls to 0.84 and 14 false positives appear, so
+  keep it at 1 or 2. Haar speed is otherwise governed mainly by `scale_factor` (1.05 is about
   1.6x slower than 1.08 but finds more faces) and `min_size`.
 - **`cascades`** — (Haar only) an ordered list of cascades. Each entry has a `name`
   (used in logs and for `--cascades` overrides), a `path`, and an
@@ -496,7 +515,7 @@ behaviour, a model, or the data changes.
 | `cascades/haarcascade_eye.xml` | Haar, eye | Active for Haar eye detection |
 | `cascades/haarcascade_profileface.xml` | Haar, left profile | Present, not enabled in `config.json` |
 | `models/face_detection_yunet_2026may.onnx` | YuNet DNN (OpenCV `FaceDetectorYN`) | Active DNN model, also supplies eye landmarks |
-| `models/face_detection_yunet_2023mar_int8bq.onnx` | YuNet DNN, int8 quantized | Present, not referenced by code or config |
+| `models/face_detection_yunet_2023mar_int8bq.onnx` | YuNet DNN, int8 quantized | Present, but does not load in OpenCV 4.10 (`DequantizeLinear` error), so it cannot be used here |
 
 ### Video data (`videos/`, git-ignored, so not in the repository)
 
@@ -507,6 +526,36 @@ behaviour, a model, or the data changes.
 | `clip3-detection.mp4` | 848x478, 30 fps, 530 frames | No | Crowd scene with small and turned faces; see change log. |
 
 ## Change log and findings
+
+### 2026-10-01 - DNN speed and stability work
+- Code (`app.py`): new `DnnFaceDetector` wrapper (optional downscale,
+  optional CLAHE, only calls `setInputSize` when the size changes);
+  `dnn.weak_score_threshold` tier applied in `Pipeline._confident` using
+  `FaceTracker.has_track_near`; boxes coast on measured velocity between
+  detection passes (`FaceTrack.velocity`, `snapshot(coast)`); the grayscale
+  conversion is skipped when neither Haar nor the eye cascade needs it.
+  `detect_faces_dnn` now returns a 7th item, the score.
+- Config (`config.json`, defaults in `app.py`): added `dnn.input_width` (0),
+  `dnn.weak_score_threshold` (0.5), `dnn.enhance_contrast` (false).
+- Results (DNN; face-reco-video with ground truth, and clip3 without):
+  - Weak tier 0.5: no change on the labelled clip (precision 1.000, recall
+    0.989, 0 false positives); on clip3 face-count changes fell 295 -> 225
+    and detections rose 1724 -> 2201. By eye, the added boxes are mostly real
+    faces of people turned away or small; below 0.5 they are mostly junk.
+  - Face hold: hold 1 gave 3 false positives and flicker 16 -> 36, hold 2 gave
+    4 and 28. This confirms the existing note, so the DNN hold stays 0.
+  - Downscale: 640 px was about 20% faster but found 29% fewer faces on clip3
+    (1724 -> 1222); 512 px about 2x faster, 2 of 90 labelled faces lost and
+    52% fewer on clip3. Left off by default.
+  - CLAHE: 65 ms against 36 ms, no accuracy gain. Left off.
+  - Adaptive smoothing (heavier smoothing on still faces): jitter only
+    0.037 -> 0.035 and box overlap fell slightly. Tried and removed.
+  - Same-session A/B of the old and new code: no slowdown (new 38.4-44.6 ms
+    against old 38.9-48.4 ms). Absolute timings on this machine drift by
+    +-30% between runs, so compare only interleaved runs.
+- Not yet done: ground truth for clip3, so its numbers above are counts and
+  flicker only, not precision/recall.
+
 
 ### 2026-10-01 - clip3: Haar is not usable on crowd footage
 - Running `detector: haar` on `clip3-detection.mp4` (every 10th frame, 53

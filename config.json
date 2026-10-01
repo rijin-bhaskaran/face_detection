@@ -1,6 +1,6 @@
 {
   "video": {
-    "path": "videos/clip3-detection.mp4",
+    "path": "videos/clip1-detection.mp4",
     "camera_index": 0,
     "source": "auto"
   },
@@ -24,7 +24,10 @@
     "model_path": "models/face_detection_yunet_2026may.onnx",
     "score_threshold": 0.7,
     "nms_threshold": 0.3,
-    "top_k": 5000
+    "top_k": 5000,
+    "input_width": 0,
+    "weak_score_threshold": 0.5,
+    "enhance_contrast": false
   },
   "eyes": {
     "enabled": true,

@@ -53,6 +53,8 @@ STACK_ALIGN = 1.0  # a box this many face-widths (or less) off-center below a he
 EYE_BOX_COLOR = (0, 0, 255)  # red, so eyes stand out from any face box color
 DNN_BOX_COLOR = BOX_COLOR_PALETTE[0]
 
+DNN_CLAHE = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
 VALID_VIDEO_SOURCES = ("auto", "camera")
 VALID_DETECTORS = ("haar", "dnn")
 VALID_EYE_SOURCES = ("auto", "cascade", "landmarks")
@@ -71,6 +73,9 @@ DEFAULT_CONFIG = {
         "score_threshold": 0.7,
         "nms_threshold": 0.3,
         "top_k": 5000,
+        "input_width": 0,  # frames wider than this are downscaled before the network; 0 = native
+        "weak_score_threshold": 0.5,  # 0 = off; else faces scoring in [this, score_threshold) count only near a tracked face
+        "enhance_contrast": False,  # CLAHE on the luminance channel before detection (hazy/dim footage)
     },
     "eyes": {
         "enabled": True,
@@ -330,7 +335,56 @@ def load_cascades(cascade_entries: list[dict]) -> list[tuple[str, cv2.CascadeCla
     return loaded
 
 
-def load_dnn_detector(dnn_settings: dict):
+class DnnFaceDetector:
+    """YuNet wrapped with the pre/post-processing the app needs.
+
+    Frames wider than input_width are downscaled before the network (it is
+    trained on small inputs, and its cost grows with the pixel count) and the
+    results are mapped back to the original frame. Faces come back as
+    (x, y, w, h, color, eye_points, score).
+    """
+
+    def __init__(self, detector, input_width: int, enhance_contrast: bool):
+        self.detector = detector
+        self.input_width = input_width
+        self.enhance_contrast = enhance_contrast
+        self._input_size = None
+
+    def detect(self, frame) -> list[tuple]:
+        frame_h, frame_w = frame.shape[:2]
+        scale = 1.0
+        net_frame = frame
+        if self.input_width and frame_w > self.input_width:
+            scale = self.input_width / frame_w
+            net_frame = cv2.resize(
+                frame, (self.input_width, max(int(round(frame_h * scale)), 1)), interpolation=cv2.INTER_AREA
+            )
+        if self.enhance_contrast:
+            lab = cv2.cvtColor(net_frame, cv2.COLOR_BGR2LAB)
+            lab[:, :, 0] = DNN_CLAHE.apply(lab[:, :, 0])
+            net_frame = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+        size = (net_frame.shape[1], net_frame.shape[0])
+        if size != self._input_size:
+            self.detector.setInputSize(size)
+            self._input_size = size
+        _, detections = self.detector.detect(net_frame)
+        if detections is None:
+            return []
+
+        faces = []
+        inv = 1.0 / scale
+        for det in detections:
+            # Row layout: x, y, w, h, 10 landmark coords, score. Clip to the frame.
+            x0, y0 = max(int(det[0] * inv), 0), max(int(det[1] * inv), 0)
+            x1, y1 = min(int((det[0] + det[2]) * inv), frame_w), min(int((det[1] + det[3]) * inv), frame_h)
+            if x1 > x0 and y1 > y0:
+                eye_points = ((int(det[4] * inv), int(det[5] * inv)), (int(det[6] * inv), int(det[7] * inv)))
+                faces.append((x0, y0, x1 - x0, y1 - y0, DNN_BOX_COLOR, eye_points, float(det[14])))
+        return faces
+
+
+def load_dnn_detector(dnn_settings: dict) -> DnnFaceDetector:
     """Create OpenCV's YuNet DNN face detector from the configured ONNX model."""
     model_path = resolve_path(dnn_settings.get("model_path", ""))
     if not os.path.isfile(model_path):
@@ -342,12 +396,18 @@ def load_dnn_detector(dnn_settings: dict):
         )
         sys.exit(1)
 
+    # The network runs at the lower of the two thresholds; Pipeline applies score_threshold itself.
+    score_floor = float(dnn_settings["score_threshold"])
+    weak = float(dnn_settings.get("weak_score_threshold") or 0.0)
+    if 0 < weak < score_floor:
+        score_floor = weak
+
     try:
         detector = cv2.FaceDetectorYN.create(
             model_path,
             "",
             (320, 320),  # placeholder; the real input size is set from the first frame
-            float(dnn_settings["score_threshold"]),
+            score_floor,
             float(dnn_settings["nms_threshold"]),
             int(dnn_settings["top_k"]),
         )
@@ -356,7 +416,9 @@ def load_dnn_detector(dnn_settings: dict):
         sys.exit(1)
 
     log.info("DNN face detector loaded: %s", model_path)
-    return detector
+    return DnnFaceDetector(
+        detector, int(dnn_settings.get("input_width") or 0), bool(dnn_settings.get("enhance_contrast", False))
+    )
 
 
 def box_iou(a: tuple, b: tuple) -> float:
@@ -454,26 +516,14 @@ def drop_boxes_below_heads(faces: list[tuple]) -> list[tuple]:
     return kept
 
 
-def detect_faces_dnn(frame, detector) -> list[tuple]:
-    """Run the DNN detector; returns (x, y, w, h, color, eye_points) per detection.
+def detect_faces_dnn(frame, detector: DnnFaceDetector) -> list[tuple]:
+    """Run the DNN detector; returns (x, y, w, h, color, eye_points, score) per detection.
 
     eye_points are the two eye-center landmarks YuNet reports for each face.
+    Faces below the detector's weak/score floor are never returned; the
+    caller decides what to do with the weak ones (see Pipeline).
     """
-    frame_h, frame_w = frame.shape[:2]
-    detector.setInputSize((frame_w, frame_h))
-    _, detections = detector.detect(frame)
-    if detections is None:
-        return []
-
-    faces = []
-    for det in detections:
-        # Row layout: x, y, w, h, 10 landmark coords, score. Clip to the frame.
-        x0, y0 = max(int(det[0]), 0), max(int(det[1]), 0)
-        x1, y1 = min(int(det[0] + det[2]), frame_w), min(int(det[1] + det[3]), frame_h)
-        if x1 > x0 and y1 > y0:
-            eye_points = ((int(det[4]), int(det[5])), (int(det[6]), int(det[7])))
-            faces.append((x0, y0, x1 - x0, y1 - y0, DNN_BOX_COLOR, eye_points))
-    return faces
+    return detector.detect(frame)
 
 
 def eyes_from_landmarks(face: tuple) -> list[tuple]:
@@ -573,6 +623,7 @@ class FaceTrack:
         self.eyes = [None, None]
         self.face_missed = 0
         self.eye_missed = [0, 0]
+        self.velocity = [0.0, 0.0]  # box x/y movement per frame, for coasting between detection passes
         self.observe(face, eyes, 1.0, 0)
 
     @staticmethod
@@ -581,9 +632,15 @@ class FaceTrack:
         ex, ey, ew, eh = eye
         return [(ex + ew / 2 - fx) / fw, (ey + eh / 2 - fy) / fh, ew / fw, eh / fh]
 
-    def observe(self, face: tuple, eyes: list, alpha: float, eye_hold: int) -> None:
-        """Blend a new detection in. alpha is the weight given to the new values."""
+    def observe(self, face: tuple, eyes: list, alpha: float, eye_hold: int, interval: int = 1) -> None:
+        """Blend a new detection in. alpha is the weight given to the new values.
+
+        interval is how many frames passed since the previous detection pass.
+        """
+        old_x, old_y = self.box[0], self.box[1]
         self.box = [o + alpha * (n - o) for o, n in zip(self.box, face[:4])]
+        measured = ((self.box[0] - old_x) / interval, (self.box[1] - old_y) / interval)
+        self.velocity = [0.5 * v + 0.5 * m for v, m in zip(self.velocity, measured)]
         self.color = face[4]
         self.face_missed = 0
 
@@ -604,9 +661,16 @@ class FaceTrack:
         if left is not None and right is not None and abs(left[0] - right[0]) < EYE_MIN_SEPARATION:
             self.eyes[0 if self.eye_missed[0] >= self.eye_missed[1] else 1] = None
 
-    def snapshot(self) -> tuple:
-        """(face, eyes) in the same shape the detectors produce, ints for drawing."""
+    def snapshot(self, coast: int = 0) -> tuple:
+        """(face, eyes) in the same shape the detectors produce, ints for drawing.
+
+        coast is how many frames ago the box was last updated; the box is
+        moved on by that many frames of its measured velocity.
+        """
         fx, fy, fw, fh = self.box
+        if coast and not self.face_missed:
+            fx += self.velocity[0] * coast
+            fy += self.velocity[1] * coast
         face = (int(round(fx)), int(round(fy)), int(round(fw)), int(round(fh)), self.color, None)
         eyes = []
         for rel in self.eyes:
@@ -634,8 +698,12 @@ class FaceTracker:
         self.eye_hold = eye_hold
         self.tracks: list[FaceTrack] = []
 
-    def update(self, detections: list) -> None:
-        """detections: (face, eyes) pairs from one detection pass."""
+    def has_track_near(self, face: tuple) -> bool:
+        """True if a live track would take this detection as its next position."""
+        return any(track_affinity(track.box, face) > 0 for track in self.tracks)
+
+    def update(self, detections: list, interval: int = 1) -> None:
+        """detections: (face, eyes) pairs from one detection pass, interval frames after the last."""
         pairs = sorted(
             (
                 (track_affinity(track.box, det[0]), ti, di)
@@ -651,7 +719,7 @@ class FaceTracker:
             used_tracks.add(ti)
             used_dets.add(di)
             face, eyes = detections[di]
-            self.tracks[ti].observe(face, eyes, self.alpha, self.eye_hold)
+            self.tracks[ti].observe(face, eyes, self.alpha, self.eye_hold, interval)
 
         for ti, track in enumerate(self.tracks):
             if ti not in used_tracks:
@@ -659,8 +727,8 @@ class FaceTracker:
         self.tracks = [t for t in self.tracks if t.face_missed <= self.face_hold]
         self.tracks += [FaceTrack(*det) for di, det in enumerate(detections) if di not in used_dets]
 
-    def current(self) -> list:
-        return [track.snapshot() for track in self.tracks]
+    def current(self, coast: int = 0) -> list:
+        return [track.snapshot(coast) for track in self.tracks]
 
 
 def list_videos(videos_dir: str) -> list[str]:
@@ -770,8 +838,11 @@ class Pipeline:
 
         self.cascades = []
         self.dnn_detector = None
+        self.score_threshold = self.weak_threshold = 0.0
         if self.detector_type == "dnn":
             self.dnn_detector = load_dnn_detector(settings["dnn"])
+            self.score_threshold = float(settings["dnn"]["score_threshold"])
+            self.weak_threshold = float(settings["dnn"].get("weak_score_threshold") or 0.0)
         else:
             self.cascades = load_cascades(settings["cascades"])
             for name, _, color, _ in self.cascades:
@@ -838,9 +909,27 @@ class Pipeline:
                 int(tracking["eye_hold_frames"]),
             )
 
+        # Grayscale is only needed by the Haar detector and the eye cascade.
+        self.needs_gray = self.dnn_detector is None or self.eye_cascade is not None
         self.frame_count = 0
+        self.last_pass = 0  # frame index of the latest detection pass
         self.results = []  # (face, eyes) pairs from the latest detection pass
         self.timings = {"detect_ms": 0.0, "eyes_ms": 0.0, "track_ms": 0.0}
+
+    def _confident(self, faces: list) -> list:
+        """Drop DNN faces below score_threshold unless a tracked face is right there.
+
+        A face that is certain enough starts or continues a track; a weaker
+        one (between weak_score_threshold and score_threshold) is only a
+        continuation, so a real face that dips in confidence for a frame
+        isn't lost, while a new, doubtful box never appears on its own.
+        """
+        if not self.weak_threshold:
+            return faces
+        return [
+            f for f in faces
+            if f[6] >= self.score_threshold or (self.tracker is not None and self.tracker.has_track_near(f))
+        ]
 
     def _eyes_for(self, gray, face: tuple) -> list:
         if not self.eyes_enabled:
@@ -859,9 +948,9 @@ class Pipeline:
         # frame's boxes are redrawn.
         if self.frame_count % self.detect_every == 0:
             start = now()
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if self.needs_gray else None
             if self.dnn_detector is not None:
-                faces = detect_faces_dnn(frame, self.dnn_detector)
+                faces = self._confident(detect_faces_dnn(frame, self.dnn_detector))
             else:
                 faces = detect_faces_haar(gray, self.cascades, self.detect_kwargs, self.min_agreement)
             # Largest faces first, so max_faces keeps the face closest to the camera.
@@ -882,11 +971,15 @@ class Pipeline:
 
             if self.tracker is not None:
                 start = now()
-                self.tracker.update(self.results)
+                self.tracker.update(self.results, self.frame_count - self.last_pass if self.frame_count else 1)
                 track_s += now() - start
+            self.last_pass = self.frame_count
 
         start = now()
-        output = self.tracker.current() if self.tracker is not None else self.results
+        # On frames without a detection pass the boxes coast on their measured velocity.
+        output = (
+            self.tracker.current(self.frame_count - self.last_pass) if self.tracker is not None else self.results
+        )
         track_s += now() - start
 
         self.frame_count += 1
