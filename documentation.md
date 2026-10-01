@@ -91,7 +91,8 @@ Face_Detection/
     "eye_hold_frames": 15
   },
   "display": {
-    "enabled": true
+    "enabled": true,
+    "show_eyes": false
   }
 }
 ```
@@ -127,7 +128,8 @@ Face_Detection/
     faces are lost (see the change log); only use it when faces are large.
   - `enhance_contrast` (default `false`) — CLAHE on the luminance channel
     before detection. About 2x slower and no gain on the sample clips.
-- **`eyes`** — eyes are drawn as red boxes inside every face box. Set
+- **`eyes`** — eyes are found for every face (drawn as red boxes only when
+  `display.show_eyes` is `true`). Set
   `enabled: false` to turn them off. `source` picks where they come from:
   `"landmarks"` uses the eye positions the DNN detector reports for each
   face (reliable, DNN only), `"cascade"` runs `haarcascade_eye.xml` inside
@@ -206,6 +208,9 @@ Face_Detection/
   actual face sizes in your footage reduces both false positives and
   stray/misaligned boxes. See the troubleshooting note below.
 - **`display.enabled`** — whether to open a preview window.
+- **`display.show_eyes`** — draw the red eye boxes on the frame (and the
+  saved video). Default `false`: only face boxes are drawn. Eyes are still
+  detected and tracked either way, so this only changes the drawing.
 
 Use `--config <path>` to point `app.py` at an alternate config file (e.g.
 `config.edge.json` with a lighter cascade set for a resource-constrained
@@ -553,6 +558,9 @@ behaviour, a model, or the data changes.
   - Same-session A/B of the old and new code: no slowdown (new 38.4-44.6 ms
     against old 38.9-48.4 ms). Absolute timings on this machine drift by
     +-30% between runs, so compare only interleaved runs.
+- Display: added `display.show_eyes` (default `false`) so only face boxes are
+  drawn; set it to `true` to bring the red eye boxes back. Detection,
+  tracking and the evaluation's eye statistics are unaffected.
 - Not yet done: ground truth for clip3, so its numbers above are counts and
   flicker only, not precision/recall.
 

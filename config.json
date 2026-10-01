@@ -58,6 +58,7 @@
     "eye_hold_frames": 15
   },
   "display": {
-    "enabled": true
+    "enabled": true,
+    "show_eyes": false
   }
 }

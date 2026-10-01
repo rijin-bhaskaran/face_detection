@@ -98,7 +98,7 @@ DEFAULT_CONFIG = {
     },
     "tracking": {"enabled": True, "smoothing": 0.4,
                  "face_hold_frames": {"haar": 1, "dnn": 0}, "eye_hold_frames": 15},
-    "display": {"enabled": True},
+    "display": {"enabled": True, "show_eyes": False},
 }
 
 
@@ -1005,6 +1005,7 @@ def main() -> None:
         cap = open_capture(video_path or None, camera_index)
 
     display_enabled = settings["display"]["enabled"]
+    show_eyes = settings["display"].get("show_eyes", False)
     frame_count = 0
     writer = None
 
@@ -1018,10 +1019,11 @@ def main() -> None:
             for face, eyes in pipeline.process(frame):
                 x, y, w, h, color = face[:5]
                 cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-                for eye in eyes:
-                    if eye is not None:
-                        ex, ey, ew, eh = eye
-                        cv2.rectangle(frame, (ex, ey), (ex + ew, ey + eh), EYE_BOX_COLOR, 1)
+                if show_eyes:
+                    for eye in eyes:
+                        if eye is not None:
+                            ex, ey, ew, eh = eye
+                            cv2.rectangle(frame, (ex, ey), (ex + ew, ey + eh), EYE_BOX_COLOR, 1)
 
             frame_count += 1
 
