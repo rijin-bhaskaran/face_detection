@@ -14,7 +14,6 @@ COPY requirements-docker.txt .
 RUN pip install --no-cache-dir -r requirements-docker.txt
 
 COPY app.py config.json ./
-COPY cascades ./cascades
 COPY models ./models
 RUN mkdir -p videos
 

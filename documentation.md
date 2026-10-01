@@ -15,14 +15,15 @@ and inside a container on an edge device for deployment.
 Face_Detection/
 ├── app.py                          # Main application
 ├── config.json                     # Selects active cascade(s), video source, detection params
-├── cascades/                       # Pre-trained Haar cascade models
-│   ├── haarcascade_frontalface_alt.xml
-│   ├── haarcascade_frontalface_default.xml
-│   ├── haarcascade_profileface.xml
-│   └── haarcascade_eye.xml
-├── models/                         # DNN face detector models (see "Models and data")
-│   ├── face_detection_yunet_2026may.onnx          # active model
-│   └── face_detection_yunet_2023mar_int8bq.onnx   # older quantized YuNet, not referenced by config/code
+├── models/                         # All pre-trained detector weights (see "Models and data")
+│   ├── cascades/                   # Haar cascade models
+│   │   ├── haarcascade_frontalface_alt.xml
+│   │   ├── haarcascade_frontalface_default.xml
+│   │   ├── haarcascade_profileface.xml
+│   │   └── haarcascade_eye.xml
+│   └── yunet/                      # DNN face detector (YuNet)
+│       ├── face_detection_yunet_2026may.onnx          # active model
+│       └── face_detection_yunet_2023mar_int8bq.onnx   # older quantized YuNet, not referenced by config/code
 ├── evaluation/                     # Latency/accuracy evaluation (see below)
 │   ├── run_evaluation.py
 │   ├── label_helper.py
@@ -51,13 +52,13 @@ Face_Detection/
   },
   "detector": "dnn",
   "cascades": [
-    { "name": "frontal_alt", "path": "cascades/haarcascade_frontalface_alt.xml", "enabled": true,
+    { "name": "frontal_alt", "path": "models/cascades/haarcascade_frontalface_alt.xml", "enabled": true,
       "min_neighbors": 3 },
-    { "name": "frontal_default", "path": "cascades/haarcascade_frontalface_default.xml", "enabled": true,
+    { "name": "frontal_default", "path": "models/cascades/haarcascade_frontalface_default.xml", "enabled": true,
       "min_neighbors": 5, "min_weight": 2 }
   ],
   "dnn": {
-    "model_path": "models/face_detection_yunet_2026may.onnx",
+    "model_path": "models/yunet/face_detection_yunet_2026may.onnx",
     "score_threshold": 0.7,
     "nms_threshold": 0.3,
     "top_k": 5000,
@@ -68,7 +69,7 @@ Face_Detection/
   "eyes": {
     "enabled": true,
     "source": "auto",
-    "cascade_path": "cascades/haarcascade_eye.xml",
+    "cascade_path": "models/cascades/haarcascade_eye.xml",
     "scale_factor": 1.1,
     "min_neighbors": 2,
     "min_size": [10, 10],
@@ -192,7 +193,7 @@ Face_Detection/
   (used in logs and for `--cascades` overrides), a `path`, and an
   `enabled` flag. Set `enabled: false` to skip a cascade without deleting
   it from the file, or add a new entry to run a custom cascade you drop
-  into `cascades/` — no code changes required. Optional per-cascade
+  into `models/cascades/` — no code changes required. Optional per-cascade
   overrides: `min_neighbors` (replaces `detection.min_neighbors` for this
   cascade) and `min_weight` (this cascade only votes for boxes whose
   detection confidence reaches it). Merged faces use the first cascade's
@@ -515,12 +516,12 @@ behaviour, a model, or the data changes.
 
 | File | Type | Status |
 |---|---|---|
-| `cascades/haarcascade_frontalface_alt.xml` | Haar, frontal face | Active (first cascade; proposes faces) |
-| `cascades/haarcascade_frontalface_default.xml` | Haar, frontal face | Active (confirms faces, `min_weight` 2) |
-| `cascades/haarcascade_eye.xml` | Haar, eye | Active for Haar eye detection |
-| `cascades/haarcascade_profileface.xml` | Haar, left profile | Present, not enabled in `config.json` |
-| `models/face_detection_yunet_2026may.onnx` | YuNet DNN (OpenCV `FaceDetectorYN`) | Active DNN model, also supplies eye landmarks |
-| `models/face_detection_yunet_2023mar_int8bq.onnx` | YuNet DNN, int8 quantized | Present, but does not load in OpenCV 4.10 (`DequantizeLinear` error), so it cannot be used here |
+| `models/cascades/haarcascade_frontalface_alt.xml` | Haar, frontal face | Active (first cascade; proposes faces) |
+| `models/cascades/haarcascade_frontalface_default.xml` | Haar, frontal face | Active (confirms faces, `min_weight` 2) |
+| `models/cascades/haarcascade_eye.xml` | Haar, eye | Active for Haar eye detection |
+| `models/cascades/haarcascade_profileface.xml` | Haar, left profile | Present, not enabled in `config.json` |
+| `models/yunet/face_detection_yunet_2026may.onnx` | YuNet DNN (OpenCV `FaceDetectorYN`) | Active DNN model, also supplies eye landmarks |
+| `models/yunet/face_detection_yunet_2023mar_int8bq.onnx` | YuNet DNN, int8 quantized | Present, but does not load in OpenCV 4.10 (`DequantizeLinear` error), so it cannot be used here |
 
 ### Video data (`videos/`, git-ignored, so not in the repository)
 
@@ -531,6 +532,17 @@ behaviour, a model, or the data changes.
 | `clip3-detection.mp4` | 848x478, 30 fps, 530 frames | No | Crowd scene with small and turned faces; see change log. |
 
 ## Change log and findings
+
+### 2026-10-01 - Model directory restructure
+
+- Consolidated all pre-trained weights under a single `models/` root:
+  `cascades/` moved to `models/cascades/`, and the YuNet `.onnx` files moved
+  from `models/` to `models/yunet/`. Moved with `git mv`, so history is kept.
+- Updated paths in `config.json`, the `DEFAULT_CONFIG` in `app.py`, the DNN
+  "model not found" message in `app.py`, `evaluation/label_helper.py`, and the
+  `Dockerfile` (a single `COPY models ./models` now covers everything).
+- Existing configs that still point at `cascades/...` or `models/*.onnx` need
+  the new paths. No detection logic changed.
 
 ### 2026-10-01 - DNN speed and stability work
 - Code (`app.py`): new `DnnFaceDetector` wrapper (optional downscale,

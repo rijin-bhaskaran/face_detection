@@ -77,8 +77,8 @@ def make_candidates(step: int) -> None:
 
     dnn_settings = dict(app.DEFAULT_CONFIG["dnn"], score_threshold=0.4)
     dnn = app.load_dnn_detector(dnn_settings)
-    alt = app.load_cascade(app.resolve_path("cascades/haarcascade_frontalface_alt.xml"))
-    default = app.load_cascade(app.resolve_path("cascades/haarcascade_frontalface_default.xml"))
+    alt = app.load_cascade(app.resolve_path("models/cascades/haarcascade_frontalface_alt.xml"))
+    default = app.load_cascade(app.resolve_path("models/cascades/haarcascade_frontalface_default.xml"))
 
     video = find_video()
     cap = cv2.VideoCapture(video)

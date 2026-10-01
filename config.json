@@ -1,6 +1,6 @@
 {
   "video": {
-    "path": "videos/clip1-detection.mp4",
+    "path": "videos/clip6-detection.mp4",
     "camera_index": 0,
     "source": "auto"
   },
@@ -8,20 +8,20 @@
   "cascades": [
     {
       "name": "frontal_alt",
-      "path": "cascades/haarcascade_frontalface_alt.xml",
+      "path": "models/cascades/haarcascade_frontalface_alt.xml",
       "enabled": true,
       "min_neighbors": 3
     },
     {
       "name": "frontal_default",
-      "path": "cascades/haarcascade_frontalface_default.xml",
+      "path": "models/cascades/haarcascade_frontalface_default.xml",
       "enabled": true,
       "min_neighbors": 5,
       "min_weight": 2
     }
   ],
   "dnn": {
-    "model_path": "models/face_detection_yunet_2026may.onnx",
+    "model_path": "models/yunet/face_detection_yunet_2026may.onnx",
     "score_threshold": 0.7,
     "nms_threshold": 0.3,
     "top_k": 5000,
@@ -32,7 +32,7 @@
   "eyes": {
     "enabled": true,
     "source": "auto",
-    "cascade_path": "cascades/haarcascade_eye.xml",
+    "cascade_path": "models/cascades/haarcascade_eye.xml",
     "scale_factor": 1.1,
     "min_neighbors": 2,
     "min_size": [10, 10],

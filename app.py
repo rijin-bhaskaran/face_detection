@@ -63,13 +63,13 @@ DEFAULT_CONFIG = {
     "video": {"path": "", "camera_index": 0, "source": "auto"},
     "detector": "haar",
     "cascades": [
-        {"name": "frontal_alt", "path": "cascades/haarcascade_frontalface_alt.xml", "enabled": True,
+        {"name": "frontal_alt", "path": "models/cascades/haarcascade_frontalface_alt.xml", "enabled": True,
          "min_neighbors": 3},
-        {"name": "frontal_default", "path": "cascades/haarcascade_frontalface_default.xml", "enabled": True,
+        {"name": "frontal_default", "path": "models/cascades/haarcascade_frontalface_default.xml", "enabled": True,
          "min_neighbors": 5, "min_weight": 2},
     ],
     "dnn": {
-        "model_path": "models/face_detection_yunet_2026may.onnx",
+        "model_path": "models/yunet/face_detection_yunet_2026may.onnx",
         "score_threshold": 0.7,
         "nms_threshold": 0.3,
         "top_k": 5000,
@@ -80,7 +80,7 @@ DEFAULT_CONFIG = {
     "eyes": {
         "enabled": True,
         "source": "auto",
-        "cascade_path": "cascades/haarcascade_eye.xml",
+        "cascade_path": "models/cascades/haarcascade_eye.xml",
         "scale_factor": 1.1,
         "min_neighbors": 2,
         "min_size": [10, 10],
@@ -391,7 +391,7 @@ def load_dnn_detector(dnn_settings: dict) -> DnnFaceDetector:
         log.error(
             "DNN model not found: %s. Download a face_detection_yunet_*.onnx from "
             "https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet "
-            "into models/, or set dnn.model_path in config.json.",
+            "into models/yunet/, or set dnn.model_path in config.json.",
             model_path,
         )
         sys.exit(1)
