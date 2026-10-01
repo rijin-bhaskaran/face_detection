@@ -20,8 +20,9 @@ Face_Detection/
 │   ├── haarcascade_frontalface_default.xml
 │   ├── haarcascade_profileface.xml
 │   └── haarcascade_eye.xml
-├── models/                         # DNN face detector model
-│   └── face_detection_yunet_2026may.onnx
+├── models/                         # DNN face detector models (see "Models and data")
+│   ├── face_detection_yunet_2026may.onnx          # active model
+│   └── face_detection_yunet_2023mar_int8bq.onnx   # older quantized YuNet, not referenced by config/code
 ├── evaluation/                     # Latency/accuracy evaluation (see below)
 │   ├── run_evaluation.py
 │   ├── label_helper.py
@@ -480,6 +481,58 @@ reliably). `label_helper.py build` then writes `ground_truth.json` from
 those decisions. The sample video's `ground_truth.json` and
 `decisions.json` are committed, so `run_evaluation.py` works out of the box;
 re-run both steps if you swap in a different video.
+
+## Models and data
+
+Keep this section and the change log below up to date whenever the code's
+behaviour, a model, or the data changes.
+
+### Models
+
+| File | Type | Status |
+|---|---|---|
+| `cascades/haarcascade_frontalface_alt.xml` | Haar, frontal face | Active (first cascade; proposes faces) |
+| `cascades/haarcascade_frontalface_default.xml` | Haar, frontal face | Active (confirms faces, `min_weight` 2) |
+| `cascades/haarcascade_eye.xml` | Haar, eye | Active for Haar eye detection |
+| `cascades/haarcascade_profileface.xml` | Haar, left profile | Present, not enabled in `config.json` |
+| `models/face_detection_yunet_2026may.onnx` | YuNet DNN (OpenCV `FaceDetectorYN`) | Active DNN model, also supplies eye landmarks |
+| `models/face_detection_yunet_2023mar_int8bq.onnx` | YuNet DNN, int8 quantized | Present, not referenced by code or config |
+
+### Video data (`videos/`, git-ignored, so not in the repository)
+
+| Clip | Resolution / fps / frames | Ground truth | Notes |
+|---|---|---|---|
+| `face-reco-video.mp4` | 768x432, 12 fps, 1091 frames | Yes (`evaluation/ground_truth.json`, 91 frames, 90 faces) | Used for all numbers in the existing report. |
+| `clip2-detection.mp4` | not profiled | No | |
+| `clip3-detection.mp4` | 848x478, 30 fps, 530 frames | No | Crowd scene with small and turned faces; see change log. |
+
+## Change log and findings
+
+### 2026-10-01 - clip3: Haar is not usable on crowd footage
+- Running `detector: haar` on `clip3-detection.mp4` (every 10th frame, 53
+  frames): Haar found 1 face in total, against 180 for the DNN, at about
+  255 ms per frame against 58 ms for the DNN (same machine).
+- Looser Haar settings (one cascade only, `min_neighbors` 2, `scale_factor`
+  1.1, `min_size` 20) took 120-230 ms per frame and still matched at most 4
+  of the 180 DNN faces. Haar cannot be tuned to cope with this clip; it
+  fails on small, turned and partly hidden faces and slows down with every
+  scale it scans.
+- Recommendation: use `"detector": "dnn"` for crowd footage. Haar remains
+  available for comparison.
+- Config note: the working-tree `config.json` was switched to `detector:
+  "haar"` and `video.path: "videos/clip3-detection.mp4"` for this test; the
+  committed default is `dnn` with an empty video path.
+- No code was changed for this finding. To score clip3 properly, ground
+  truth must first be built with `evaluation/label_helper.py`.
+
+### 2026-09-28 - Initial DNN + evaluation work (commit 8889bdf)
+- Added the YuNet DNN detector and the `detector` switch, DNN eye landmarks,
+  multi-cascade agreement voting, torso-box suppression, face/eye tracking
+  and smoothing, and `detect_every_n_frames`.
+- Added `evaluation/` (latency and accuracy report, labelling helper,
+  ground truth for `face-reco-video.mp4`).
+- Results on `face-reco-video.mp4`: Haar recall 0.911 and 78 ms per frame;
+  DNN recall 0.989 and 22 ms per frame (report `reports/20260929-095747`).
 
 ## Controls (when a display is available)
 
