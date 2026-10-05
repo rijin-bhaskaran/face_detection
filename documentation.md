@@ -568,6 +568,39 @@ behaviour, a model, or the data changes.
   `detect_every_n_frames: 2` is also left at 1; it is the next lever if
   detection alone is too slow.
 - Not tested: the camera path (`threaded_capture`), as no camera was used.
+- Startup log: the "Latency features" line now says why a feature is off,
+  `off (config)` or `off (camera only)` / `off (needs a preview ...)`.
+  Previously `threaded_capture=False` on a video file looked like the config
+  was ignored; it is intentional, as the capture thread only applies to a
+  live camera.
+- Per-frame DNN latency check (`evaluation/run_evaluation.py --detectors dnn
+  --video videos/face-reco-video.mp4`, 3 passes, same video and machine as
+  every earlier report). `Pipeline.process` was not changed, and this
+  evaluation calls it directly, so it cannot see the preview changes:
+
+  | Report | detect_every_n_frames | Mean ms | p95 ms | Recall | Precision |
+  |---|---|---|---|---|---|
+  | 20260929-095747 (initial) | 1 | 22.3 | 24.2 | 0.989 | 1.000 |
+  | 20261001-121300 | 1 | 35.8 | 40.6 | 0.989 | 1.000 |
+  | 20261001-131249 | 1 | 42.3 | 57.3 | 0.989 | 1.000 |
+  | 20261001-131601 | 1 | 49.5 | 64.7 | 0.989 | 1.000 |
+  | 20261005-112927 (after latency work) | 1 | 34.8 | 42.4 | 0.989 | 1.000 |
+  | 20261005-112702 (committed config) | 2 | 15.9 | 35.4 | 0.989 | 1.000 |
+
+  - No increase from the preview changes: 34.8 ms sits inside the 35.8-49.5
+    ms of the three earlier reports, and accuracy is identical.
+  - The 22 -> 36 ms rise happened between 09-29 and 10-01, before this work.
+    Passes within one report drift by up to 40% (29.5, 35.3, 41.5 ms in
+    20261005-112927), so the cause was not isolated; an interleaved A/B of the
+    old and new code is needed to separate machine drift from a real cost.
+  - 20261005-112702 ran with `detect_every_n_frames: 2` (the config as
+    committed in 12f1641): half the frames skip detection, so its 15.9 mean
+    is not comparable with the others. Its median (13.1) and p95 (35.4) show
+    the two kinds of frame.
+  - The first attempt at this report ran on `clip1-detection.mp4` (the first
+    file in `videos/`) against `face-reco-video.mp4` ground truth, and was
+    discarded. Always pass `--video videos/face-reco-video.mp4` when
+    scoring accuracy.
 
 ### 2026-10-01 - Model directory restructure
 

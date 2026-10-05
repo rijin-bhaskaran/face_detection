@@ -46,7 +46,7 @@
     "max_size": null,
     "max_faces": 0,
     "min_cascade_agreement": 2,
-    "detect_every_n_frames": 2
+    "detect_every_n_frames": 1
   },
   "tracking": {
     "enabled": true,
@@ -63,7 +63,7 @@
   },
   "performance": {
     "threaded_capture": true,
-    "async_detection": false,
+    "async_detection": true,
     "pace_video": true,
     "log_timings_every": 100
   }

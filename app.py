@@ -1190,9 +1190,16 @@ def main() -> None:
 
     stats = FrameStats(int(perf["log_timings_every"] or 0))
     detector = AsyncPipeline(pipeline, stats) if use_async else None
+    def feature_state(enabled: bool, wanted: bool, needs: str) -> str:
+        if enabled:
+            return "on"
+        return f"off ({needs})" if wanted else "off (config)"
+
     log.info(
         "Latency features: threaded_capture=%s async_detection=%s pace_video=%s",
-        isinstance(cap, LatestFrameReader), use_async, pace,
+        feature_state(isinstance(cap, LatestFrameReader), bool(perf["threaded_capture"]), "camera only"),
+        feature_state(use_async, bool(perf["async_detection"]), "needs a preview and no --save-video"),
+        feature_state(pace, bool(perf["pace_video"]), "video file with a preview and no --save-video"),
     )
 
     frame_count = 0  # frames shown
