@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 
 import cv2
@@ -99,6 +100,12 @@ DEFAULT_CONFIG = {
     "tracking": {"enabled": True, "smoothing": 0.4,
                  "face_hold_frames": {"haar": 1, "dnn": 0}, "eye_hold_frames": 15},
     "display": {"enabled": True, "show_eyes": False},
+    "performance": {
+        "threaded_capture": True,  # camera: a thread keeps only the newest frame, so the preview never lags behind
+        "async_detection": True,  # detect in a worker thread; the preview never waits for the detector
+        "pace_video": True,  # video files play at their own FPS, dropping frames when processing falls behind
+        "log_timings_every": 100,  # log average per-stage timings every N frames; 0 = off
+    },
 }
 
 
@@ -236,6 +243,7 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "detection": {**DEFAULT_CONFIG["detection"], **user_config.get("detection", {})},
         "tracking": {**DEFAULT_CONFIG["tracking"], **user_config.get("tracking", {})},
         "display": {**DEFAULT_CONFIG["display"], **user_config.get("display", {})},
+        "performance": {**DEFAULT_CONFIG["performance"], **user_config.get("performance", {})},
     }
 
     if args.detector is not None:
@@ -991,6 +999,167 @@ class Pipeline:
         return output
 
 
+class FrameStats:
+    """Average milliseconds per pipeline stage, logged every `every` frames (0 = off)."""
+
+    def __init__(self, every: int):
+        self.every = every
+        self._lock = threading.Lock()
+        self._reset()
+
+    def _reset(self) -> None:
+        self._sums: dict[str, float] = {}
+        self._counts: dict[str, int] = {}
+        self._frames = 0
+        self._dropped = 0
+        self._since = time.perf_counter()
+
+    def add(self, name: str, value: float) -> None:
+        with self._lock:
+            self._sums[name] = self._sums.get(name, 0.0) + value
+            self._counts[name] = self._counts.get(name, 0) + 1
+
+    def frame_done(self, dropped: int = 0) -> None:
+        with self._lock:
+            self._frames += 1
+            self._dropped += dropped
+            due = self.every and self._frames >= self.every
+        if due:
+            self.report()
+
+    def report(self) -> None:
+        with self._lock:
+            if not self._frames:
+                return
+            elapsed = time.perf_counter() - self._since
+            stages = " | ".join(
+                f"{name} {self._sums[name] / self._counts[name]:.1f}"
+                for name in self._sums
+                if name != "lag"
+            )
+            lag = self._sums.get("lag", 0.0) / self._counts["lag"] if self._counts.get("lag") else None
+            line = f"{self._frames / elapsed:.1f} fps over {self._frames} frames; avg ms: {stages}"
+            if lag is not None:
+                line += f"; boxes trail the video by {lag:.1f} frame(s)"
+            if self._dropped:
+                line += f"; {self._dropped} frame(s) dropped to stay in real time"
+            self._reset()
+        log.info("Timing: %s", line)
+
+
+class LatestFrameReader:
+    """Reads a live camera on its own thread and hands out only the newest frame.
+
+    A camera keeps filling its buffer while the main loop is busy, so a plain
+    cap.read() returns frames that are already old. Here older unread frames
+    are overwritten instead, so each read() is as fresh as the camera allows.
+    """
+
+    def __init__(self, cap: cv2.VideoCapture):
+        self.cap = cap
+        self._cond = threading.Condition()
+        self._frame = None
+        self._fresh = False
+        self._alive = True
+        self._stop = False
+        self._thread = threading.Thread(target=self._run, name="capture", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        while not self._stop:
+            ret, frame = self.cap.read()
+            with self._cond:
+                if not ret:
+                    self._alive = False
+                    self._cond.notify_all()
+                    return
+                self._frame, self._fresh = frame, True
+                self._cond.notify_all()
+
+    def read(self) -> tuple[bool, object]:
+        with self._cond:
+            while not self._fresh and self._alive:
+                self._cond.wait()
+            if not self._fresh:
+                return False, None
+            self._fresh = False
+            return True, self._frame
+
+    def get(self, prop: int) -> float:
+        return self.cap.get(prop)
+
+    def release(self) -> None:
+        self._stop = True
+        self._thread.join(timeout=2)
+        self.cap.release()
+
+
+class AsyncPipeline:
+    """Runs Pipeline.process on a worker thread so showing frames never waits for detection.
+
+    submit() hands over a frame only when the worker is idle (the freshest
+    frame at that moment); latest() returns the newest finished result and the
+    index of the frame it was computed for. Only the worker touches the
+    pipeline, so detections are the same as in the synchronous loop; the boxes
+    just trail the video by however long one detection pass takes.
+    """
+
+    def __init__(self, pipeline: "Pipeline", stats: FrameStats):
+        self.pipeline = pipeline
+        self.stats = stats
+        self.error: BaseException | None = None
+        self._cond = threading.Condition()
+        self._job = None
+        self._busy = False
+        self._stop = False
+        self._result = ([], -1)
+        self._thread = threading.Thread(target=self._run, name="detection", daemon=True)
+        self._thread.start()
+
+    @property
+    def idle(self) -> bool:
+        return not self._busy
+
+    def submit(self, index: int, frame) -> None:
+        with self._cond:
+            self._job, self._busy = (index, frame), True
+            self._cond.notify()
+
+    def latest(self) -> tuple[list, int]:
+        return self._result
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while self._job is None and not self._stop:
+                    self._cond.wait()
+                if self._stop:
+                    return
+                index, frame = self._job
+                self._job = None
+            try:
+                output = self.pipeline.process(frame)
+            except BaseException as exc:  # surfaced by the main loop
+                self.error = exc
+                self._busy = False
+                return
+            for stage, ms in self.pipeline.timings.items():
+                self.stats.add(stage.removesuffix("_ms"), ms)
+            self._result = (output, index)
+            self._busy = False
+
+    def close(self) -> None:
+        with self._cond:
+            self._stop = True
+            self._cond.notify()
+        self._thread.join(timeout=5)
+
+
+def video_fps(cap) -> float:
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    return fps if 1 <= fps <= 240 else 25.0
+
+
 def main() -> None:
     args = parse_args()
     settings = resolve_settings(args)
@@ -1006,17 +1175,57 @@ def main() -> None:
 
     display_enabled = settings["display"]["enabled"]
     show_eyes = settings["display"].get("show_eyes", False)
-    frame_count = 0
+    perf = settings["performance"]
+
+    # Cameras report no frame count; video files do. Saving a video or running
+    # headless needs every frame processed exactly, so those runs skip the
+    # latency features (they only matter for a live preview).
+    is_file = cap.get(cv2.CAP_PROP_FRAME_COUNT) > 0
+    realtime = display_enabled and not args.save_video
+    pace = bool(perf["pace_video"]) and is_file and realtime
+    use_async = bool(perf["async_detection"]) and realtime
+    period = 1.0 / video_fps(cap)
+    if perf["threaded_capture"] and not is_file:
+        cap = LatestFrameReader(cap)
+
+    stats = FrameStats(int(perf["log_timings_every"] or 0))
+    detector = AsyncPipeline(pipeline, stats) if use_async else None
+    log.info(
+        "Latency features: threaded_capture=%s async_detection=%s pace_video=%s",
+        isinstance(cap, LatestFrameReader), use_async, pace,
+    )
+
+    frame_count = 0  # frames shown
+    source_index = 0  # frames consumed from the source, including dropped ones
+    pace_start = None
     writer = None
 
     try:
         while True:
+            loop_start = time.perf_counter()
             ret, frame = cap.read()
             if not ret:
                 log.info("No more frames to read. Stopping.")
                 break
+            if pace_start is None:
+                pace_start = loop_start
+            stats.add("read", (time.perf_counter() - loop_start) * 1000)
 
-            for face, eyes in pipeline.process(frame):
+            if detector is not None:
+                if detector.error is not None:
+                    raise detector.error
+                if detector.idle:
+                    detector.submit(source_index, frame.copy())  # the worker needs the undrawn frame
+                output, result_index = detector.latest()
+                if result_index >= 0:
+                    stats.add("lag", source_index - result_index)
+            else:
+                output = pipeline.process(frame)
+                for stage, ms in pipeline.timings.items():
+                    stats.add(stage.removesuffix("_ms"), ms)
+
+            start = time.perf_counter()
+            for face, eyes in output:
                 x, y, w, h, color = face[:5]
                 cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
                 if show_eyes:
@@ -1024,8 +1233,10 @@ def main() -> None:
                         if eye is not None:
                             ex, ey, ew, eh = eye
                             cv2.rectangle(frame, (ex, ey), (ex + ew, ey + eh), EYE_BOX_COLOR, 1)
+            stats.add("draw", (time.perf_counter() - start) * 1000)
 
             frame_count += 1
+            source_index += 1
 
             if args.save_video:
                 if writer is None:
@@ -1038,21 +1249,42 @@ def main() -> None:
                     )
                 writer.write(frame)
 
+            dropped = 0
             if display_enabled:
+                wait_ms = 1
+                if pace:
+                    # The next frame is due one period after this one was; if that moment
+                    # has passed, skip the frames we are already late for.
+                    remaining = pace_start + source_index * period - time.perf_counter()
+                    if remaining > 0:
+                        wait_ms = max(int(remaining * 1000), 1)
+                    else:
+                        for _ in range(int(-remaining / period)):
+                            if not cap.grab():
+                                break
+                            source_index += 1
+                            dropped += 1
                 try:
+                    start = time.perf_counter()
                     cv2.imshow("Face Detection", frame)
-                    if cv2.waitKey(1) & 0xFF in (ord("q"), 27):
+                    stats.add("show", (time.perf_counter() - start) * 1000)
+                    if cv2.waitKey(wait_ms) & 0xFF in (ord("q"), 27):
                         log.info("Quit key pressed. Stopping.")
                         break
                 except cv2.error as exc:
                     log.warning("Display unavailable (%s). Continuing headless.", exc)
-                    display_enabled = False
+                    display_enabled = pace = False
+            stats.add("loop", (time.perf_counter() - loop_start) * 1000)
+            stats.frame_done(dropped)
 
+        stats.report()
         log.info("Finished processing. Total frames processed: %d", frame_count)
 
     except KeyboardInterrupt:
         log.info("Interrupted by user. Stopping.")
     finally:
+        if detector is not None:
+            detector.close()
         cap.release()
         if writer is not None:
             writer.release()

@@ -212,6 +212,22 @@ Face_Detection/
 - **`display.show_eyes`** — draw the red eye boxes on the frame (and the
   saved video). Default `false`: only face boxes are drawn. Eyes are still
   detected and tracked either way, so this only changes the drawing.
+- **`performance`** — preview latency, with no change to what is detected.
+  All four apply only to a live preview: with `--save-video` or
+  `display.enabled: false`, async detection and pacing are skipped so every
+  frame is processed exactly and in order.
+  - `async_detection` (default `true`) — detection runs on a worker thread
+    and the window never waits for it. Boxes trail the video by about one
+    detection pass (about 2 frames on clip6); set `false` for boxes that are
+    exactly on the frame they were found in.
+  - `pace_video` (default `true`) — a video file plays at its own FPS,
+    sleeping when ahead and dropping frames when behind. Without it the clip
+    plays as fast as the loop can run (slow when detection is slow).
+  - `threaded_capture` (default `true`) — camera only: a thread keeps just
+    the newest frame, so the preview doesn't fall behind the camera's buffer.
+  - `log_timings_every` (default `100`, `0` = off) — logs the average
+    milliseconds per stage (read, detect, eyes, track, draw, show, loop), the
+    frame rate, how many frames the boxes trail by, and frames dropped.
 
 Use `--config <path>` to point `app.py` at an alternate config file (e.g.
 `config.edge.json` with a lighter cascade set for a resource-constrained
@@ -532,6 +548,26 @@ behaviour, a model, or the data changes.
 | `clip3-detection.mp4` | 848x478, 30 fps, 530 frames | No | Crowd scene with small and turned faces; see change log. |
 
 ## Change log and findings
+
+### 2026-10-05 - Preview latency
+- Cause: `main()` ran read, detect, draw and show one after another on one
+  thread, so every frame waited for the detector; a video file ran with no
+  pacing (slow when detection was slow), and a camera's buffer filled with old
+  frames.
+- Code (`app.py`): new `performance` config section (see Configuration);
+  `AsyncPipeline` (worker thread, the same `Pipeline.process`, so detections
+  are unchanged), `LatestFrameReader` (camera), frame pacing and dropping for
+  video files, and `FrameStats` (periodic timing log). `Pipeline` itself is
+  untouched, so `evaluation/` results are unaffected.
+- Measured on clip6 (dnn, native resolution, same machine, back to back):
+  before 20-24 fps and 42-50 ms per loop (the clip played at about 70% speed);
+  after 30 fps and 33 ms per loop (real time), boxes trailing by about 2
+  frames, 1 frame dropped in the first 100.
+- Not done: `dnn.input_width` downscaling. The earlier measurement above
+  (640 px found 29% fewer faces on clip3) rules it out as a latency fix.
+  `detect_every_n_frames: 2` is also left at 1; it is the next lever if
+  detection alone is too slow.
+- Not tested: the camera path (`threaded_capture`), as no camera was used.
 
 ### 2026-10-01 - Model directory restructure
 
